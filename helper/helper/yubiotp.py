@@ -12,30 +12,40 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-from .base import RpcNode, action, child
+from .base import RpcNode, action, child, decode_bytes
 
-from yubikit.core import NotSupportedError
+from yubikit.core import NotSupportedError, CommandError
+from yubikit.core.otp import modhex_encode, modhex_decode
 from yubikit.yubiotp import (
     YubiOtpSession,
     SLOT,
+    SlotConfiguration,
     UpdateConfiguration,
     HmacSha1SlotConfiguration,
     HotpSlotConfiguration,
     StaticPasswordSlotConfiguration,
     YubiOtpSlotConfiguration,
-    StaticTicketSlotConfiguration,
 )
-from typing import Dict
+from ykman.otp import generate_static_pw, format_csv
+from yubikit.oath import parse_b32_key
+from ykman.scancodes import KEYBOARD_LAYOUT, encode
+
+import struct
+
+_FAIL_MSG = (
+    "Failed to write to the YubiKey. Make sure the device does not "
+    "have restricted access"
+)
 
 
 class YubiOtpNode(RpcNode):
-    def __init__(self, connection):
+    def __init__(self, connection, scp_params=None):
         super().__init__()
-        self.session = YubiOtpSession(connection)
+        self.session = YubiOtpSession(connection, scp_params)
 
     def get_data(self):
         state = self.session.get_config_state()
-        data: Dict[str, bool] = {}
+        data: dict[str, bool] = {}
         try:
             data.update(
                 slot1_configured=state.is_configured(SLOT.ONE),
@@ -53,8 +63,11 @@ class YubiOtpNode(RpcNode):
         return data
 
     @action
-    def swap(self, params, event, signal):
-        self.session.swap_slots()
+    def swap(self):
+        try:
+            self.session.swap_slots()
+        except CommandError:
+            raise ValueError(_FAIL_MSG)
         return dict()
 
     @child
@@ -65,14 +78,34 @@ class YubiOtpNode(RpcNode):
     def two(self):
         return SlotNode(self.session, SLOT.TWO)
 
+    @action(closes_child=False)
+    def serial_modhex(self, serial: int):
+        return dict(encoded=modhex_encode(b"\xff\x00" + struct.pack(b">I", serial)))
 
-_CONFIG_TYPES = dict(
-    hmac_sha1=HmacSha1SlotConfiguration,
-    hotp=HotpSlotConfiguration,
-    static_password=StaticPasswordSlotConfiguration,
-    yubiotp=YubiOtpSlotConfiguration,
-    static_ticket=StaticTicketSlotConfiguration,
-)
+    @action(closes_child=False)
+    def generate_static(self, length: int, layout: str):
+        return dict(password=generate_static_pw(length, KEYBOARD_LAYOUT[layout]))
+
+    @action(closes_child=False)
+    def keyboard_layouts(self):
+        return {layout.name: [sc for sc in layout.value] for layout in KEYBOARD_LAYOUT}
+
+    @action(closes_child=False)
+    def format_yubiotp_csv(
+        self,
+        serial: int,
+        public_id: str,
+        private_id: bytes,
+        key: bytes,
+    ):
+        return dict(
+            csv=format_csv(
+                serial,
+                modhex_decode(public_id),
+                private_id,
+                key,
+            )
+        )
 
 
 class SlotNode(RpcNode):
@@ -84,7 +117,7 @@ class SlotNode(RpcNode):
 
     def get_data(self):
         self._state = self.session.get_config_state()
-        data: Dict[str, bool] = {}
+        data: dict[str, bool] = {}
         try:
             data.update(is_configured=self._state.is_configured(self.slot))
             data.update(is_touch_triggered=self._state.is_touch_triggered(self.slot))
@@ -112,16 +145,20 @@ class SlotNode(RpcNode):
             return False
 
     @action(condition=lambda self: self._maybe_configured(self.slot))
-    def delete(self, params, event, signal):
-        self.session.delete_slot(self.slot, params.pop("cur_acc_code", None))
+    def delete(self, curr_acc_code: bytes | None = None):
+        try:
+            self.session.delete_slot(self.slot, curr_acc_code)
+            return dict()
+        except CommandError:
+            raise ValueError(_FAIL_MSG)
 
     @action(condition=lambda self: self._can_calculate(self.slot))
-    def calculate(self, params, event, signal):
-        challenge = bytes.fromhex(params.pop("challenge"))
+    def calculate(self, event, challenge: bytes):
         response = self.session.calculate_hmac_sha1(self.slot, challenge, event)
         return dict(response=response)
 
-    def _apply_config(self, config, params):
+    @staticmethod
+    def _apply_options(config, options) -> None:
         for option in (
             "serial_api_visible",
             "serial_usb_visible",
@@ -140,51 +177,78 @@ class SlotNode(RpcNode):
             "short_ticket",
             "manual_update",
         ):
-            if option in params:
-                getattr(config, option)(params.pop(option))
+            if option in options:
+                getattr(config, option)(options.pop(option))
 
         for option in ("tabs", "delay", "pacing", "strong_password"):
-            if option in params:
-                getattr(config, option)(*params.pop(option))
+            if option in options:
+                getattr(config, option)(*options.pop(option))
 
-        if "token_id" in params:
-            token_id, *args = params.pop("token_id")
-            config.token_id(bytes.fromhex(token_id), *args)
+        if "token_id" in options:
+            token_id, *args = options.pop("token_id")
+            config.token_id(decode_bytes(token_id), *args)
 
-        return config
+    @staticmethod
+    def _get_config(cfg_type: str, **kwargs) -> SlotConfiguration:
+        match cfg_type:
+            case "hmac_sha1":
+                return HmacSha1SlotConfiguration(decode_bytes(kwargs["key"]))
+            case "hotp":
+                return HotpSlotConfiguration(parse_b32_key(kwargs["key"]))
+            case "static_password":
+                return StaticPasswordSlotConfiguration(
+                    encode(
+                        kwargs["password"], KEYBOARD_LAYOUT[kwargs["keyboard_layout"]]
+                    )
+                )
+            case "yubiotp":
+                return YubiOtpSlotConfiguration(
+                    fixed=modhex_decode(kwargs["public_id"]),
+                    uid=decode_bytes(kwargs["private_id"]),
+                    key=decode_bytes(kwargs["key"]),
+                )
+            case unsupported:
+                raise ValueError(
+                    f"Unsupported configuration type provided: {unsupported}"
+                )
 
     @action
-    def put(self, params, event, signal):
-        config = None
-        for key in _CONFIG_TYPES:
-            if key in params:
-                if config is not None:
-                    raise ValueError("Only one configuration type can be provided.")
-                config = _CONFIG_TYPES[key](
-                    *(bytes.fromhex(arg) for arg in params.pop(key))
-                )
-        if config is None:
-            raise ValueError("No supported configuration type provided.")
-        self._apply_config(config, params)
-        self.session.put_configuration(
-            self.slot,
-            config,
-            params.pop("acc_code", None),
-            params.pop("cur_acc_code", None),
-        )
-        return dict()
+    def put(
+        self,
+        type: str,
+        options: dict = {},
+        curr_acc_code: bytes | None = None,
+        **kwargs,
+    ):
+        config = self._get_config(type, **kwargs)
+        self._apply_options(config, options)
+        try:
+            self.session.put_configuration(
+                self.slot,
+                config,
+                curr_acc_code,
+                curr_acc_code,
+            )
+            return dict()
+        except CommandError:
+            raise ValueError(_FAIL_MSG)
 
     @action(
         condition=lambda self: self._state.version >= (2, 2, 0)
         and self._maybe_configured(self.slot)
     )
-    def update(self, params, event, signal):
+    def update(
+        self,
+        acc_code: bytes | None = None,
+        curr_acc_code: bytes | None = None,
+        **kwargs,
+    ):
         config = UpdateConfiguration()
-        self._apply_config(config, params)
+        self._apply_options(config, kwargs)
         self.session.update_configuration(
             self.slot,
             config,
-            params.pop("acc_code", None),
-            params.pop("cur_acc_code", None),
+            acc_code,
+            curr_acc_code,
         )
         return dict()

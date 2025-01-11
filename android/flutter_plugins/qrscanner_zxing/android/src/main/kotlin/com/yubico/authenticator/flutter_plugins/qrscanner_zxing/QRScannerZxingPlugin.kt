@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022 Yubico.
+ * Copyright (C) 2022,2024 Yubico.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -42,7 +42,7 @@ class PermissionsResultRegistrar {
             requestCode,
             permissions,
             grantResults
-        ) ?: false
+        ) == true
     }
 }
 
@@ -65,10 +65,24 @@ class QRScannerZxingPlugin : FlutterPlugin, MethodCallHandler, ActivityAware,
     }
 
     override fun onMethodCall(call: MethodCall, result: Result) {
-        if (call.method == "getPlatformVersion") {
-            result.success("Android ${android.os.Build.VERSION.RELEASE}")
-        } else {
-            result.notImplemented()
+        when (call.method) {
+            "getPlatformVersion" -> {
+                result.success("Android ${android.os.Build.VERSION.RELEASE}")
+            }
+
+            "scanBitmap" -> {
+                val bytes = call.argument<ByteArray>("bytes")
+                if (bytes != null) {
+                    val scanResult = QrCodeScanner.decodeFromBytes(bytes)
+                    result.success(scanResult)
+                } else {
+                    result.error("Failure", "Invalid image", null)
+                }
+            }
+
+            else -> {
+                result.notImplemented()
+            }
         }
     }
 

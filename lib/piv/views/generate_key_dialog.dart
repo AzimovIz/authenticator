@@ -22,19 +22,23 @@ import '../../app/message.dart';
 import '../../app/models.dart';
 import '../../app/state.dart';
 import '../../core/models.dart';
+import '../../widgets/app_input_decoration.dart';
+import '../../widgets/app_text_field.dart';
 import '../../widgets/choice_filter_chip.dart';
 import '../../widgets/responsive_dialog.dart';
+import '../keys.dart' as keys;
 import '../models.dart';
 import '../state.dart';
-import '../keys.dart' as keys;
 import 'overwrite_confirm_dialog.dart';
+import 'utils.dart';
 
 class GenerateKeyDialog extends ConsumerStatefulWidget {
   final DevicePath devicePath;
   final PivState pivState;
   final PivSlot pivSlot;
-  const GenerateKeyDialog(this.devicePath, this.pivState, this.pivSlot,
-      {super.key});
+  final bool showMatch;
+  GenerateKeyDialog(this.devicePath, this.pivState, this.pivSlot, {super.key})
+      : showMatch = pivSlot.slot != SlotId.cardAuth && pivState.supportsBio;
 
   @override
   ConsumerState<ConsumerStatefulWidget> createState() =>
@@ -50,6 +54,7 @@ class _GenerateKeyDialogState extends ConsumerState<GenerateKeyDialog> {
   late DateTime _validTo;
   late DateTime _validToDefault;
   late DateTime _validToMax;
+  late bool _allowMatch;
   bool _generating = false;
 
   @override
@@ -61,6 +66,8 @@ class _GenerateKeyDialogState extends ConsumerState<GenerateKeyDialog> {
     _validToDefault = DateTime.utc(now.year + 1, now.month, now.day);
     _validTo = _validToDefault;
     _validToMax = DateTime.utc(now.year + 10, now.month, now.day);
+
+    _allowMatch = widget.showMatch;
   }
 
   @override
@@ -69,8 +76,14 @@ class _GenerateKeyDialogState extends ConsumerState<GenerateKeyDialog> {
     final textTheme = Theme.of(context).textTheme;
     // This is what ListTile uses for subtitle
     final subtitleStyle = textTheme.bodyMedium!.copyWith(
-      color: textTheme.bodySmall!.color,
+      color: Theme.of(context).colorScheme.onSurfaceVariant,
     );
+
+    final isFips =
+        ref.watch(currentDeviceDataProvider).valueOrNull?.info.isFips ?? false;
+
+    final canSave = !_generating &&
+        (!_invalidSubject || _generateType == GenerateType.publicKey);
 
     return ResponsiveDialog(
       allowCancel: !_generating,
@@ -78,9 +91,8 @@ class _GenerateKeyDialogState extends ConsumerState<GenerateKeyDialog> {
       actions: [
         TextButton(
           key: keys.saveButton,
-          onPressed: _generating || _invalidSubject
-              ? null
-              : () async {
+          onPressed: canSave
+              ? () async {
                   if (!await confirmOverwrite(
                     context,
                     widget.pivSlot,
@@ -96,41 +108,32 @@ class _GenerateKeyDialogState extends ConsumerState<GenerateKeyDialog> {
 
                   final pivNotifier =
                       ref.read(pivSlotsProvider(widget.devicePath).notifier);
-                  final withContext = ref.read(withContextProvider);
 
-                  if (!await pivNotifier.validateRfc4514(_subject)) {
+                  if (!(_generateType == GenerateType.publicKey ||
+                      await pivNotifier.validateRfc4514(_subject))) {
                     setState(() {
                       _generating = false;
+                      _invalidSubject = true;
                     });
-                    _invalidSubject = true;
                     return;
                   }
 
-                  void Function()? close;
-                  final PivGenerateResult result;
-                  try {
-                    close = await withContext<void Function()>(
-                        (context) async => showMessage(
-                              context,
-                              l10n.l_generating_private_key,
-                              duration: const Duration(seconds: 30),
-                            ));
-                    result = await pivNotifier.generate(
-                      widget.pivSlot.slot,
-                      _keyType,
-                      parameters: switch (_generateType) {
-                        GenerateType.certificate =>
-                          PivGenerateParameters.certificate(
-                              subject: _subject,
-                              validFrom: _validFrom,
-                              validTo: _validTo),
-                        GenerateType.csr =>
-                          PivGenerateParameters.csr(subject: _subject),
-                      },
-                    );
-                  } finally {
-                    close?.call();
-                  }
+                  final result = await pivNotifier.generate(
+                    widget.pivSlot.slot,
+                    _keyType,
+                    pinPolicy: getPinPolicy(widget.pivSlot.slot, _allowMatch),
+                    parameters: switch (_generateType) {
+                      GenerateType.publicKey =>
+                        PivGenerateParameters.publicKey(),
+                      GenerateType.certificate =>
+                        PivGenerateParameters.certificate(
+                            subject: _subject,
+                            validFrom: _validFrom,
+                            validTo: _validTo),
+                      GenerateType.csr =>
+                        PivGenerateParameters.csr(subject: _subject),
+                    },
+                  );
 
                   await ref.read(withContextProvider)(
                     (context) async {
@@ -141,7 +144,8 @@ class _GenerateKeyDialogState extends ConsumerState<GenerateKeyDialog> {
                       );
                     },
                   );
-                },
+                }
+              : null,
           child: Text(l10n.s_save),
         ),
       ],
@@ -157,24 +161,25 @@ class _GenerateKeyDialogState extends ConsumerState<GenerateKeyDialog> {
               style: textTheme.bodyLarge,
             ),
             Text(l10n.p_subject_desc),
-            TextField(
+            AppTextField(
               autofocus: true,
               key: keys.subjectField,
-              decoration: InputDecoration(
-                  border: const OutlineInputBorder(),
-                  labelText: l10n.s_subject,
-                  errorText: _subject.isNotEmpty && _invalidSubject
-                      ? l10n.l_rfc4514_invalid
-                      : null),
+              decoration: AppInputDecoration(
+                border: const OutlineInputBorder(),
+                labelText: l10n.s_subject,
+                errorText: _subject.isNotEmpty && _invalidSubject
+                    ? l10n.l_rfc4514_invalid
+                    : null,
+              ),
               textInputAction: TextInputAction.next,
-              enabled: !_generating,
+              enabled: !_generating && _generateType != GenerateType.publicKey,
               onChanged: (value) {
                 setState(() {
                   _invalidSubject = value.isEmpty;
                   _subject = value;
                 });
               },
-            ),
+            ).init(),
             Text(
               l10n.rfc4514_examples,
               style: subtitleStyle,
@@ -183,14 +188,17 @@ class _GenerateKeyDialogState extends ConsumerState<GenerateKeyDialog> {
               l10n.s_options,
               style: textTheme.bodyLarge,
             ),
-            Text(l10n.p_cert_options_desc),
+            Text(widget.showMatch
+                ? l10n.p_cert_options_bio_desc
+                : l10n.p_cert_options_desc),
             Wrap(
                 crossAxisAlignment: WrapCrossAlignment.center,
                 spacing: 4.0,
                 runSpacing: 8.0,
                 children: [
                   ChoiceFilterChip<KeyType>(
-                    items: KeyType.values,
+                    items:
+                        getSupportedKeyTypes(widget.pivState.version, isFips),
                     value: _keyType,
                     selected: _keyType != defaultKeyType,
                     itemBuilder: (value) => Text(value.getDisplayName(l10n)),
@@ -199,6 +207,9 @@ class _GenerateKeyDialogState extends ConsumerState<GenerateKeyDialog> {
                         : (value) {
                             setState(() {
                               _keyType = value;
+                              if (value == KeyType.x25519) {
+                                _generateType = GenerateType.publicKey;
+                              }
                             });
                           },
                   ),
@@ -207,7 +218,7 @@ class _GenerateKeyDialogState extends ConsumerState<GenerateKeyDialog> {
                     value: _generateType,
                     selected: _generateType != defaultGenerateType,
                     itemBuilder: (value) => Text(value.getDisplayName(l10n)),
-                    onChanged: _generating
+                    onChanged: _generating || _keyType == KeyType.x25519
                         ? null
                         : (value) {
                             setState(() {
@@ -234,7 +245,29 @@ class _GenerateKeyDialogState extends ConsumerState<GenerateKeyDialog> {
                               }
                             },
                     ),
+                  if (widget.showMatch)
+                    FilterChip(
+                      label: Text(l10n.s_allow_fingerprint),
+                      selected: _allowMatch,
+                      onSelected: _generating
+                          ? null
+                          : (value) {
+                              setState(() {
+                                _allowMatch = value;
+                              });
+                            },
+                    ),
                 ]),
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Visibility(
+                visible: _generating,
+                maintainSize: true,
+                maintainAnimation: true,
+                maintainState: true,
+                child: const LinearProgressIndicator(),
+              ),
+            ),
           ]
               .map((e) => Padding(
                     padding: const EdgeInsets.symmetric(vertical: 8.0),

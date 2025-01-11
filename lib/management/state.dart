@@ -15,10 +15,10 @@
  */
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:yubico_authenticator/management/models.dart';
 
 import '../app/models.dart';
 import '../core/state.dart';
+import 'models.dart';
 
 final managementStateProvider = AsyncNotifierProvider.autoDispose
     .family<ManagementStateNotifier, DeviceInfo, DevicePath>(
@@ -28,13 +28,13 @@ final managementStateProvider = AsyncNotifierProvider.autoDispose
 abstract class ManagementStateNotifier
     extends ApplicationStateNotifier<DeviceInfo> {
   Future<void> writeConfig(DeviceConfig config,
-      {String currentLockCode = '',
-      String newLockCode = '',
-      bool reboot = false});
+      {String? currentLockCode, String? newLockCode, bool reboot = false});
 
   Future<void> setMode({
     required int interfaces,
     int challengeResponseTimeout = 0,
     int? autoEjectTimeout,
   });
+
+  Future<void> deviceReset();
 }

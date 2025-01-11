@@ -18,7 +18,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_gen/gen_l10n/app_localizations.dart';
 
 import '../keys.dart' as keys;
+import 'qr_scanner_provider.dart';
 import 'qr_scanner_scan_status.dart';
+import 'qr_scanner_widgets.dart';
 
 class QRScannerUI extends StatelessWidget {
   final ScanStatus status;
@@ -68,23 +70,33 @@ class QRScannerUI extends StatelessWidget {
               const SizedBox(height: 16),
               Column(
                 children: [
-                  Text(
-                    l10n.q_no_qr,
-                    textScaleFactor: 0.7,
-                    style: const TextStyle(color: Colors.white),
-                  ),
-                  OutlinedButton(
-                      onPressed: () {
-                        Navigator.of(context).pop('');
-                      },
-                      key: keys.manualEntryButton,
-                      child: Text(
-                        l10n.s_enter_manually,
-                        style: const TextStyle(color: Colors.white),
-                      )),
+                  SmallWhiteText(l10n.q_no_qr),
+                  Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                    OutlinedButton(
+                        onPressed: () {
+                          Navigator.of(context).pop(
+                              AndroidQrScanner.kQrScannerRequestManualEntry);
+                        },
+                        key: keys.manualEntryButton,
+                        child: Text(
+                          l10n.s_enter_manually,
+                          style: const TextStyle(color: Colors.white),
+                        )),
+                    const SizedBox(width: 16),
+                    OutlinedButton(
+                        onPressed: () {
+                          Navigator.of(context).pop(
+                              AndroidQrScanner.kQrScannerRequestReadFromFile);
+                        },
+                        key: keys.readFromImage,
+                        child: Text(
+                          l10n.s_read_from_file,
+                          style: const TextStyle(color: Colors.white),
+                        ))
+                  ])
                 ],
               ),
-              const SizedBox(height: 8)
+              const SizedBox(height: 16)
             ],
           ),
         )

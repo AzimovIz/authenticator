@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2023 Yubico.
+ * Copyright (C) 2022-2024 Yubico.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,23 +15,25 @@
  */
 
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_gen/gen_l10n/app_localizations.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:material_symbols_icons/symbols.dart';
+
 import '../../android/app_methods.dart';
 import '../../android/state.dart';
-import '../../exception/cancellation_exception.dart';
 import '../../core/state.dart';
-import '../../fido/views/fido_screen.dart';
-import '../../oath/views/add_account_page.dart';
+import '../../fido/views/fingerprints_screen.dart';
+import '../../fido/views/passkeys_screen.dart';
+import '../../fido/views/webauthn_page.dart';
+import '../../home/views/home_message_page.dart';
+import '../../home/views/home_screen.dart';
 import '../../oath/views/oath_screen.dart';
 import '../../oath/views/utils.dart';
+import '../../otp/views/otp_screen.dart';
 import '../../piv/views/piv_screen.dart';
-import '../../widgets/custom_icons.dart';
-import '../message.dart';
 import '../models.dart';
 import '../state.dart';
 import 'device_error_screen.dart';
-import 'message_page.dart';
 
 class MainPage extends ConsumerWidget {
   const MainPage({super.key});
@@ -47,12 +49,22 @@ class MainPage extends ConsumerWidget {
     );
 
     if (isAndroid) {
-      isNfcEnabled().then((value) =>
-          ref.read(androidNfcStateProvider.notifier).setNfcEnabled(value));
+      isNfcEnabled().then(
+          (value) => ref.read(androidNfcAdapterState.notifier).enable(value));
     }
 
     // If the current device changes, we need to pop any open dialogs.
-    ref.listen<AsyncValue<YubiKeyData>>(currentDeviceDataProvider, (_, __) {
+    ref.listen<AsyncValue<YubiKeyData>>(currentDeviceDataProvider,
+        (prev, next) {
+      final serial = next.hasValue == true ? next.value?.info.serial : null;
+      final prevSerial =
+          prev?.hasValue == true ? prev?.value?.info.serial : null;
+      if ((serial != null && serial == prevSerial) ||
+          (next.hasValue && (prev != null && prev.isLoading)) ||
+          next.isLoading) {
+        return;
+      }
+
       Navigator.of(context).popUntil((route) {
         return route.isFirst ||
             [
@@ -69,103 +81,63 @@ class MainPage extends ConsumerWidget {
     });
 
     final deviceNode = ref.watch(currentDeviceProvider);
-    final isDarkTheme = Theme.of(context).brightness == Brightness.dark;
     final noKeyImage = Image.asset(
-      isDarkTheme
-          ? 'assets/graphics/no-key_dark.png'
-          : 'assets/graphics/no-key.png',
+      'assets/graphics/no-key.png',
       filterQuality: FilterQuality.medium,
       scale: 2,
+      color: Theme.of(context).colorScheme.primary,
     );
     if (deviceNode == null) {
       if (isAndroid) {
         var hasNfcSupport = ref.watch(androidNfcSupportProvider);
-        var isNfcEnabled = ref.watch(androidNfcStateProvider);
-        return MessagePage(
+        var isNfcEnabled = ref.watch(androidNfcAdapterState);
+        return HomeMessagePage(
+          centered: true,
           graphic: noKeyImage,
-          message: hasNfcSupport && isNfcEnabled
+          header: hasNfcSupport && isNfcEnabled
               ? l10n.l_insert_or_tap_yk
               : l10n.l_insert_yk,
-          actions: [
+          actionsBuilder: (context, expanded) => [
             if (hasNfcSupport && !isNfcEnabled)
               ElevatedButton.icon(
                   label: Text(l10n.s_enable_nfc),
-                  icon: nfcIcon,
+                  icon: const Icon(Symbols.contactless),
                   onPressed: () async {
                     await openNfcSettings();
-                  })
+                  }),
+            ElevatedButton.icon(
+                label: Text(l10n.s_add_account),
+                icon: const Icon(Symbols.person_add_alt),
+                onPressed: () async {
+                  // make sure we execute the "Add account" in OATH section
+                  ref
+                      .read(currentSectionProvider.notifier)
+                      .setCurrentSection(Section.accounts);
+                  await addOathAccount(context, ref);
+                })
           ],
-          actionButtonBuilder: (context) => IconButton(
-            icon: const Icon(Icons.person_add_alt_1),
-            tooltip: l10n.s_add_account,
-            onPressed: () async {
-              final withContext = ref.read(withContextProvider);
-              final scanner = ref.read(qrScannerProvider);
-              if (scanner != null) {
-                try {
-                  final qrData = await scanner.scanQr();
-                  if (qrData != null) {
-                    await withContext((context) =>
-                        handleUri(context, null, qrData, null, null, l10n));
-                    return;
-                  }
-                } on CancellationException catch (_) {
-                  // ignored - user cancelled
-                  return;
-                }
-              }
-              await withContext((context) => showBlurDialog(
-                    context: context,
-                    routeSettings:
-                        const RouteSettings(name: 'oath_add_account'),
-                    builder: (context) {
-                      return const OathAddAccountPage(
-                        null,
-                        null,
-                        credentials: null,
-                      );
-                    },
-                  ));
-            },
-          ),
         );
       } else {
-        return MessagePage(
-          delayedContent: true,
+        return HomeMessagePage(
+          centered: true,
+          delayedContent: false,
           graphic: noKeyImage,
-          message: l10n.l_insert_yk,
+          header: l10n.l_insert_yk,
         );
       }
     } else {
       return ref.watch(currentDeviceDataProvider).when(
             data: (data) {
-              final app = ref.watch(currentAppProvider);
-              if (data.info.supportedCapabilities.isEmpty &&
-                  data.name == 'Unrecognized device') {
-                return MessagePage(
-                  header: l10n.s_yk_not_recognized,
-                );
-              } else if (app.getAvailability(data) ==
-                  Availability.unsupported) {
-                return MessagePage(
-                  header: l10n.s_app_not_supported,
-                  message: l10n.l_app_not_supported_on_yk(app.name),
-                );
-              } else if (app.getAvailability(data) != Availability.enabled) {
-                return MessagePage(
-                  header: l10n.s_app_disabled,
-                  message: l10n.l_app_disabled_desc(app.name),
-                );
-              }
+              final section = ref.watch(currentSectionProvider);
 
-              return switch (app) {
-                Application.oath => OathScreen(data.node.path),
-                Application.fido => FidoScreen(data),
-                Application.piv => PivScreen(data.node.path),
-                _ => MessagePage(
-                    header: l10n.s_app_not_supported,
-                    message: l10n.l_app_not_supported_desc,
-                  ),
+              return switch (section) {
+                Section.home => HomeScreen(data),
+                Section.accounts => OathScreen(data.node.path),
+                Section.securityKey => const WebAuthnScreen(),
+                Section.passkeys => PasskeysScreen(data),
+                Section.fingerprints => FingerprintsScreen(data),
+                Section.certificates => PivScreen(data.node.path),
+                Section.slots => OtpScreen(data.node.path),
               };
             },
             loading: () => DeviceErrorScreen(deviceNode),

@@ -18,6 +18,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:args/args.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -25,15 +26,16 @@ import 'package:flutter_gen/gen_l10n/app_localizations.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:local_notifier/local_notifier.dart';
 import 'package:logging/logging.dart';
+import 'package:material_symbols_icons/symbols.dart';
+import 'package:path/path.dart' as path;
+import 'package:path_provider/path_provider.dart';
 import 'package:screen_retriever/screen_retriever.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
-import 'package:yubico_authenticator/exception/initialization_exception.dart';
 
 import '../app/app.dart';
 import '../app/logging.dart';
 import '../app/message.dart';
-import '../app/models.dart';
 import '../app/state.dart';
 import '../app/views/app_failure_page.dart';
 import '../app/views/main_page.dart';
@@ -42,12 +44,14 @@ import '../core/state.dart';
 import '../fido/state.dart';
 import '../management/state.dart';
 import '../oath/state.dart';
+import '../otp/state.dart';
 import '../piv/state.dart';
 import '../version.dart';
 import 'devices.dart';
 import 'fido/state.dart';
 import 'management/state.dart';
 import 'oath/state.dart';
+import 'otp/state.dart';
 import 'piv/state.dart';
 import 'qr_scanner.dart';
 import 'rpc.dart';
@@ -62,6 +66,10 @@ const String _keyLeft = 'DESKTOP_WINDOW_LEFT';
 const String _keyTop = 'DESKTOP_WINDOW_TOP';
 const String _keyWidth = 'DESKTOP_WINDOW_WIDTH';
 const String _keyHeight = 'DESKTOP_WINDOW_HEIGHT';
+const String _logLevel = 'log-level';
+const String _logFile = 'log-file';
+const String _hidden = 'hidden';
+const String _shown = 'shown';
 
 void _saveWindowBounds(WindowManagerHelper helper) async {
   final bounds = await helper.getBounds();
@@ -110,12 +118,39 @@ class _WindowEventListener extends WindowListener {
 }
 
 Future<Widget> initialize(List<String> argv) async {
-  _initLogging(argv);
+  final parser = ArgParser();
+  parser.addOption(_logFile);
+  parser.addOption(_logLevel);
+  parser.addFlag(_hidden);
+  parser.addFlag(_shown);
+  final args = parser.parse(argv);
+  _initLogging(args);
 
   await windowManager.ensureInitialized();
-  final prefs = await SharedPreferences.getInstance();
+  SharedPreferences prefs;
+  try {
+    prefs = await SharedPreferences.getInstance();
+  } catch (error) {
+    Directory appSupportDirectory = await getApplicationSupportDirectory();
+    String appDataPath =
+        path.join(appSupportDirectory.path, 'shared_preferences.json');
+    _log.warning(
+        'Failed to load the preferences file at $appDataPath. Attempting to repair it.');
+    await _repairPreferences(appDataPath);
+
+    try {
+      prefs = await SharedPreferences.getInstance();
+    } catch (error) {
+      _log.warning(
+          'Failed to repair the preferences file. Deleting the file and proceeding with a fresh configuration.');
+      await File(appDataPath).delete();
+      prefs = await SharedPreferences.getInstance();
+    }
+  }
   final windowManagerHelper = WindowManagerHelper.withPreferences(prefs);
-  final isHidden = _getIsHidden(argv, prefs);
+  final isHidden = _getIsHidden(args, prefs);
+
+  _log.info('Window hidden on startup: $isHidden');
 
   final bounds = Rect.fromLTWH(
     prefs.getDouble(_keyLeft) ?? WindowDefaults.bounds.left,
@@ -127,10 +162,8 @@ Future<Widget> initialize(List<String> argv) async {
   _log.debug('Using saved window bounds (or defaults): $bounds');
 
   unawaited(windowManager
-      .waitUntilReadyToShow(WindowOptions(
-    minimumSize: WindowDefaults.minSize,
-    skipTaskbar: isHidden,
-  ))
+      .waitUntilReadyToShow(
+          const WindowOptions(minimumSize: WindowDefaults.minSize))
       .then((_) async {
     await windowManagerHelper.setBounds(bounds);
 
@@ -172,12 +205,6 @@ Future<Widget> initialize(List<String> argv) async {
 
   return ProviderScope(
     overrides: [
-      supportedAppsProvider.overrideWith(implementedApps([
-        Application.oath,
-        Application.fido,
-        Application.piv,
-        Application.management,
-      ])),
       prefProvider.overrideWithValue(prefs),
       rpcProvider.overrideWith((_) => rpcFuture),
       windowStateProvider.overrideWith(
@@ -198,22 +225,27 @@ Future<Widget> initialize(List<String> argv) async {
       currentDeviceDataProvider.overrideWith(
         (ref) => ref.watch(desktopDeviceDataProvider),
       ),
+      currentSectionProvider.overrideWith(
+        (ref) => desktopCurrentSectionNotifier(ref),
+      ),
       // OATH
-      oathStateProvider.overrideWithProvider(desktopOathState),
+      oathStateProvider.overrideWithProvider(desktopOathState.call),
       credentialListProvider
-          .overrideWithProvider(desktopOathCredentialListProvider),
+          .overrideWithProvider(desktopOathCredentialListProvider.call),
       qrScannerProvider.overrideWith(
         (ref) => ref.watch(desktopQrScannerProvider),
       ),
       // Management
-      managementStateProvider.overrideWithProvider(desktopManagementState),
+      managementStateProvider.overrideWithProvider(desktopManagementState.call),
       // FIDO
-      fidoStateProvider.overrideWithProvider(desktopFidoState),
-      fingerprintProvider.overrideWithProvider(desktopFingerprintProvider),
-      credentialProvider.overrideWithProvider(desktopCredentialProvider),
+      fidoStateProvider.overrideWithProvider(desktopFidoState.call),
+      fingerprintProvider.overrideWithProvider(desktopFingerprintProvider.call),
+      credentialProvider.overrideWithProvider(desktopCredentialProvider.call),
       // PIV
-      pivStateProvider.overrideWithProvider(desktopPivState),
-      pivSlotsProvider.overrideWithProvider(desktopPivSlots),
+      pivStateProvider.overrideWithProvider(desktopPivState.call),
+      pivSlotsProvider.overrideWithProvider(desktopPivSlots.call),
+      // OTP
+      otpStateProvider.overrideWithProvider(desktopOtpState.call)
     ],
     child: YubicoAuthenticatorApp(
       page: Consumer(
@@ -226,17 +258,18 @@ Future<Widget> initialize(List<String> argv) async {
           // Load feature flags, if they exist
           featureFile.exists().then(
             (exists) async {
+              final featureFlag = ref.read(featureFlagProvider.notifier);
               if (exists) {
                 try {
                   final featureConfig =
                       jsonDecode(await featureFile.readAsString());
-                  ref
-                      .read(featureFlagProvider.notifier)
-                      .loadConfig(featureConfig);
+                  featureFlag.loadConfig(featureConfig);
                 } catch (error) {
                   _log.error('Failed to parse feature flags', error);
                 }
               }
+              // Hardcode features here:
+              // featureFlag.setFeature(feature, false);
             },
           );
 
@@ -266,29 +299,23 @@ Future<RpcSession> _initHelper(String exe) async {
   return rpc;
 }
 
-void _initLogging(List<String> argv) {
-  final logFileIndex = argv.indexOf('--log-file');
+void _initLogging(ArgResults args) {
+  final path = args[_logFile];
+  final levelName = args[_logLevel];
+
   File? file;
-  if (logFileIndex != -1) {
-    String path;
-    try {
-      path = argv[logFileIndex + 1];
-    } catch (e) {
-      throw InitializationException(
-          'USAGE: Missing argument for option --log-file');
-    }
+  if (path != null) {
     file = File(path);
   }
+
   Logger.root.onRecord.listen((record) {
-    if (logFileIndex != -1) {
-      if (file != null) {
-        file.writeAsStringSync(
-            '${record.time.logFormat} [${record.loggerName}] ${record.level}: ${record.message}${Platform.lineTerminator}',
+    if (file != null) {
+      file.writeAsStringSync(
+          '${record.time.logFormat} [${record.loggerName}] ${record.level}: ${record.message}${Platform.lineTerminator}',
+          mode: FileMode.append);
+      if (record.error != null) {
+        file.writeAsStringSync('${record.error}${Platform.lineTerminator}',
             mode: FileMode.append);
-        if (record.error != null) {
-          file.writeAsStringSync('${record.error}${Platform.lineTerminator}',
-              mode: FileMode.append);
-        }
       }
     }
     stderr.writeln(
@@ -298,10 +325,8 @@ void _initLogging(List<String> argv) {
     }
   });
 
-  final logLevelIndex = argv.indexOf('--log-level');
-  if (logLevelIndex != -1) {
+  if (levelName != null) {
     try {
-      final levelName = argv[logLevelIndex + 1];
       Level level = Levels.LEVELS
           .firstWhere((level) => level.name == levelName.toUpperCase());
       Logger.root.level = level;
@@ -335,14 +360,13 @@ void _initLicenses() async {
   });
 }
 
-bool _getIsHidden(List<String> argv, SharedPreferences prefs) {
-  if (argv.contains('--hidden') || argv.contains('--shown')) {
-    final isHidden = argv.contains('--hidden') && !argv.contains('--shown');
-    prefs.setBool(windowHidden, isHidden);
-    return isHidden;
-  } else {
-    return prefs.getBool(windowHidden) ?? false;
+bool _getIsHidden(ArgResults args, SharedPreferences prefs) {
+  bool isHidden = false;
+  if (args[_hidden] || args[_shown]) {
+    isHidden = args[_hidden] && !args[_shown];
   }
+  prefs.setBool(windowHidden, isHidden);
+  return isHidden;
 }
 
 class _HelperWaiter extends ConsumerStatefulWidget {
@@ -375,11 +399,12 @@ class _HelperWaiterState extends ConsumerState<_HelperWaiter> {
     if (slow) {
       final l10n = AppLocalizations.of(context)!;
       return MessagePage(
+        centered: true,
         graphic: const CircularProgressIndicator(),
         message: l10n.l_helper_not_responding,
-        actions: [
+        actionsBuilder: (context, expanded) => [
           ActionChip(
-            avatar: const Icon(Icons.copy),
+            avatar: const Icon(Symbols.content_copy),
             label: Text(l10n.s_copy_log),
             onPressed: () async {
               _log.info('Copying log to clipboard ($version)...');
@@ -402,9 +427,20 @@ class _HelperWaiterState extends ConsumerState<_HelperWaiter> {
       );
     } else {
       return const MessagePage(
+        centered: true,
         delayedContent: true,
         graphic: CircularProgressIndicator(),
       );
     }
   }
+}
+
+Future<void> _repairPreferences(String appDataPath) async {
+  List<int> contents = await File(appDataPath).readAsBytes();
+  var contentsGrowable = List<int>.from(contents); // Make the list growable
+
+  // Remove any NUL characters
+  contentsGrowable.removeWhere((item) => item == 0);
+
+  await File(appDataPath).writeAsBytes(contentsGrowable);
 }

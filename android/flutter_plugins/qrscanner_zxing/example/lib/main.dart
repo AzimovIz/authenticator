@@ -14,7 +14,9 @@
  * limitations under the License.
  */
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:qrscanner_zxing/qrscanner_zxing_method_channel.dart';
 import 'package:qrscanner_zxing/qrscanner_zxing_view.dart';
 
 import 'cutout_overlay.dart';
@@ -24,7 +26,7 @@ void main() {
 }
 
 class QRCodeScannerExampleApp extends StatelessWidget {
-  const QRCodeScannerExampleApp({Key? key}) : super(key: key);
+  const QRCodeScannerExampleApp({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -39,7 +41,7 @@ class QRCodeScannerExampleApp extends StatelessWidget {
 }
 
 class AppHomePage extends StatelessWidget {
-  const AppHomePage({Key? key, required this.title}) : super(key: key);
+  const AppHomePage({super.key, required this.title});
   final String title;
 
   @override
@@ -64,6 +66,36 @@ class AppHomePage extends StatelessWidget {
                       ));
                 },
                 child: const Text("Open QR Scanner")),
+            ElevatedButton(
+                onPressed: () async {
+                  var channel = MethodChannelQRScannerZxing();
+                  final scaffoldMessenger = ScaffoldMessenger.of(context);
+                  final result = await FilePicker.platform.pickFiles(
+                      allowedExtensions: ['png', 'jpg', 'gif', 'webp'],
+                      type: FileType.custom,
+                      allowMultiple: false,
+                      lockParentWindow: true,
+                      withData: true,
+                      dialogTitle: 'Select file with QR code');
+
+                  if (result == null || !result.isSinglePick) {
+                    // no result
+                    return;
+                  }
+
+                  final bytes = result.files.first.bytes;
+                  if (bytes != null) {
+                    var value = await channel.scanBitmap(bytes);
+                    final snackBar = SnackBar(
+                        content: Text(value == null
+                            ? 'No QR code detected'
+                            : 'QR: $value'));
+                    scaffoldMessenger.showSnackBar(snackBar);
+                  } else {
+                    // no files selected
+                  }
+                },
+                child: const Text("Scan from file")),
           ],
         ),
       ),
@@ -72,7 +104,7 @@ class AppHomePage extends StatelessWidget {
 }
 
 class QRScannerPage extends StatefulWidget {
-  const QRScannerPage({Key? key}) : super(key: key);
+  const QRScannerPage({super.key});
 
   @override
   QRScannerPageState createState() => QRScannerPageState();

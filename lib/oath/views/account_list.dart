@@ -18,18 +18,24 @@ import 'package:flutter/material.dart';
 import 'package:flutter_gen/gen_l10n/app_localizations.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../widgets/list_title.dart';
+import '../../widgets/flex_box.dart';
 import '../models.dart';
 import '../state.dart';
 import 'account_view.dart';
 
 class AccountList extends ConsumerWidget {
   final List<OathPair> accounts;
-  const AccountList(this.accounts, {super.key});
+  final bool expanded;
+  final OathCredential? selected;
+  const AccountList(this.accounts,
+      {super.key, required this.expanded, this.selected});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final l10n = AppLocalizations.of(context)!;
+    final theme = Theme.of(context);
+    final labelStyle =
+        theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.primary);
     final credentials = ref.watch(filteredCredentialsProvider(accounts));
     final favorites = ref.watch(favoritesProvider);
     if (credentials.isEmpty) {
@@ -43,23 +49,71 @@ class AccountList extends ConsumerWidget {
     final creds =
         credentials.where((entry) => !favorites.contains(entry.credential.id));
 
+    final oathLayout = ref.watch(oathLayoutProvider);
+    final pinnedLayout =
+        (oathLayout == OathLayout.grid || oathLayout == OathLayout.mixed)
+            ? FlexLayout.grid
+            : FlexLayout.list;
+    final normalLayout =
+        oathLayout == OathLayout.grid ? FlexLayout.grid : FlexLayout.list;
+
     return FocusTraversalGroup(
       policy: WidgetOrderTraversalPolicy(),
-      child: Column(
-        children: [
-          if (pinnedCreds.isNotEmpty) ListTitle(l10n.s_pinned),
-          ...pinnedCreds.map(
-            (entry) => AccountView(
-              entry.credential,
+      child: Padding(
+        padding: const EdgeInsets.only(top: 8.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (pinnedCreds.isNotEmpty) ...[
+              Padding(
+                padding: const EdgeInsets.only(left: 18, bottom: 8),
+                child: Text(l10n.s_pinned, style: labelStyle),
+              ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 10.0),
+                child: FlexBox<OathPair>(
+                  items: pinnedCreds.toList(),
+                  itemBuilder: (value) => AccountView(
+                    value.credential,
+                    expanded: expanded,
+                    selected: value.credential == selected,
+                    large: pinnedLayout == FlexLayout.grid,
+                  ),
+                  cellMinWidth: 250,
+                  spacing: pinnedLayout == FlexLayout.grid ? 4.0 : 0.0,
+                  runSpacing: pinnedLayout == FlexLayout.grid ? 4.0 : 0.0,
+                  layout: pinnedLayout,
+                ),
+              ),
+            ],
+            if (pinnedCreds.isNotEmpty && creds.isNotEmpty) ...[
+              const SizedBox(height: 24),
+              Padding(
+                padding: const EdgeInsets.only(left: 18, bottom: 8),
+                child: Text(
+                  l10n.s_accounts,
+                  style: labelStyle,
+                ),
+              ),
+            ],
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10.0),
+              child: FlexBox<OathPair>(
+                items: creds.toList(),
+                itemBuilder: (value) => AccountView(
+                  value.credential,
+                  expanded: expanded,
+                  selected: value.credential == selected,
+                  large: normalLayout == FlexLayout.grid,
+                ),
+                cellMinWidth: 250,
+                spacing: normalLayout == FlexLayout.grid ? 4.0 : 0.0,
+                runSpacing: normalLayout == FlexLayout.grid ? 4.0 : 0.0,
+                layout: normalLayout,
+              ),
             ),
-          ),
-          if (creds.isNotEmpty) ListTitle(l10n.s_accounts),
-          ...creds.map(
-            (entry) => AccountView(
-              entry.credential,
-            ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

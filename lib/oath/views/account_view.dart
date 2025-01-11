@@ -14,36 +14,34 @@
  * limitations under the License.
  */
 
-import 'package:collection/collection.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../app/message.dart';
 import '../../app/shortcuts.dart';
-import '../../app/state.dart';
 import '../../app/views/app_list_item.dart';
 import '../../core/state.dart';
-import '../models.dart';
 import '../features.dart' as features;
-import '../state.dart';
-import 'account_dialog.dart';
+import '../models.dart';
 import 'account_helper.dart';
 import 'account_icon.dart';
-import 'actions.dart';
-import 'delete_account_dialog.dart';
-import 'rename_account_dialog.dart';
 
 class AccountView extends ConsumerStatefulWidget {
   final OathCredential credential;
-  const AccountView(this.credential, {super.key});
+  final bool expanded;
+  final bool selected;
+  final bool large;
+  const AccountView(this.credential,
+      {super.key,
+      required this.expanded,
+      required this.selected,
+      this.large = false});
 
   @override
   ConsumerState<ConsumerStatefulWidget> createState() => _AccountViewState();
 }
 
 String _a11yCredentialLabel(String? issuer, String name, String? code) {
-  return [issuer, name, code].whereNotNull().join(' ');
+  return [issuer, name, code].nonNulls.join(' ');
 }
 
 class _AccountViewState extends ConsumerState<AccountView> {
@@ -81,100 +79,135 @@ class _AccountViewState extends ConsumerState<AccountView> {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final darkMode = theme.brightness == Brightness.dark;
     final hasFeature = ref.watch(featureProvider);
+    final helper = AccountHelper(context, ref, credential);
+    final subtitle = helper.subtitle;
+    final circleAvatar = CircleAvatar(
+      foregroundColor: Theme.of(context).colorScheme.surface,
+      backgroundColor: _iconColor(400),
+      child: Text(
+        (credential.issuer ?? credential.name).characters.first.toUpperCase(),
+        style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w300),
+      ),
+    );
 
-    return registerOathActions(
+    final openIntent = OpenIntent<OathCredential>(widget.credential);
+    final buttonStyle = FilledButton.styleFrom(
+        backgroundColor: Theme.of(context).hoverColor, elevation: 0);
+    return AppListItem<OathCredential>(
       credential,
-      ref: ref,
-      actions: {
-        OpenIntent: CallbackAction<OpenIntent>(onInvoke: (_) async {
-          await showBlurDialog(
-            context: context,
-            barrierColor: Colors.transparent,
-            builder: (context) => AccountDialog(credential),
-          );
-          return null;
-        }),
-        if (hasFeature(features.accountsRename))
-          EditIntent: CallbackAction<EditIntent>(onInvoke: (_) async {
-            final node = ref.read(currentDeviceProvider)!;
-            final credentials = ref.read(credentialsProvider);
-            final withContext = ref.read(withContextProvider);
-            return await withContext((context) async => await showBlurDialog(
-                  context: context,
-                  builder: (context) => RenameAccountDialog.forOathCredential(
-                    ref,
-                    node,
-                    credential,
-                    credentials?.map((e) => (e.issuer, e.name)).toList() ?? [],
-                  ),
-                ));
-          }),
-        if (hasFeature(features.accountsDelete))
-          DeleteIntent: CallbackAction<DeleteIntent>(onInvoke: (_) async {
-            final node = ref.read(currentDeviceProvider)!;
-            return await ref.read(withContextProvider)((context) async =>
-                await showBlurDialog(
-                  context: context,
-                  builder: (context) => DeleteAccountDialog(node, credential),
-                ) ??
-                false);
-          }),
-      },
-      builder: (context) {
-        final helper = AccountHelper(context, ref, credential);
-        return LayoutBuilder(builder: (context, constraints) {
-          final showAvatar = constraints.maxWidth >= 315;
-          final subtitle = helper.subtitle;
-          final circleAvatar = CircleAvatar(
-            foregroundColor: darkMode ? Colors.black : Colors.white,
-            backgroundColor: _iconColor(darkMode ? 300 : 400),
-            child: Text(
-              (credential.issuer ?? credential.name)
-                  .characters
-                  .first
-                  .toUpperCase(),
-              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w300),
-            ),
-          );
-
-          return Shortcuts(
-              shortcuts: {
-                LogicalKeySet(LogicalKeyboardKey.enter): const OpenIntent(),
-                LogicalKeySet(LogicalKeyboardKey.space): const OpenIntent(),
-              },
-              child: Semantics(
-                label: _a11yCredentialLabel(
-                    credential.issuer, credential.name, helper.code?.value),
-                child: AppListItem(
-                  leading: showAvatar
-                      ? AccountIcon(
-                          issuer: credential.issuer,
-                          defaultWidget: circleAvatar)
-                      : null,
-                  title: helper.title,
-                  subtitle: subtitle,
-                  trailing: helper.code != null
-                      ? FilledButton.tonalIcon(
-                          icon: helper.buildCodeIcon(),
-                          label: helper.buildCodeLabel(),
-                          onPressed:
-                              Actions.handler(context, const OpenIntent()),
+      selected: widget.selected,
+      leading:
+          AccountIcon(issuer: credential.issuer, defaultWidget: circleAvatar),
+      title: helper.title,
+      subtitle: subtitle,
+      semanticTitle: _a11yCredentialLabel(
+          credential.issuer, credential.name, helper.code?.value),
+      trailing: helper.code != null
+          ? FilledButton.tonalIcon(
+              icon: helper.buildCodeIcon(),
+              label: helper.buildCodeLabel(),
+              style: buttonStyle,
+              onPressed: Actions.handler(context, openIntent),
+            )
+          : FilledButton.tonal(
+              style: buttonStyle,
+              onPressed: Actions.handler(context, openIntent),
+              child: helper.buildCodeIcon()),
+      tapIntent: isDesktop && !widget.expanded ? null : openIntent,
+      doubleTapIntent: hasFeature(features.accountsClipboard)
+          ? CopyIntent<OathCredential>(credential)
+          : null,
+      buildPopupActions: (_) => helper.buildActions(),
+      itemBuilder: widget.large
+          ? (context) {
+              return ListTile(
+                mouseCursor: !(isDesktop && !widget.expanded)
+                    ? SystemMouseCursors.click
+                    : null,
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16)),
+                selectedTileColor:
+                    Theme.of(context).colorScheme.secondaryContainer,
+                selectedColor:
+                    Theme.of(context).colorScheme.onSecondaryContainer,
+                selected: widget.selected,
+                tileColor: Theme.of(context).hoverColor,
+                contentPadding:
+                    const EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0),
+                title: Column(
+                  children: [
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        AccountIcon(
+                            issuer: credential.issuer,
+                            defaultWidget: circleAvatar),
+                        const SizedBox(width: 12),
+                        Flexible(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                helper.title,
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .bodyLarge
+                                    ?.copyWith(
+                                        color: Theme.of(context)
+                                            .colorScheme
+                                            .onSurface),
+                                overflow: TextOverflow.fade,
+                                maxLines: 1,
+                                softWrap: false,
+                              ),
+                              if (subtitle != null)
+                                Text(
+                                  subtitle,
+                                  style: Theme.of(context)
+                                      .textTheme
+                                      .bodyMedium
+                                      ?.copyWith(
+                                          color: Theme.of(context)
+                                              .colorScheme
+                                              .onSurfaceVariant),
+                                  overflow: TextOverflow.fade,
+                                  maxLines: 1,
+                                  softWrap: false,
+                                )
+                            ],
+                          ),
                         )
-                      : FilledButton.tonal(
-                          onPressed:
-                              Actions.handler(context, const OpenIntent()),
-                          child: helper.buildCodeIcon()),
-                  activationIntent: hasFeature(features.accountsClipboard)
-                      ? const CopyIntent()
-                      : const OpenIntent(),
-                  buildPopupActions: (_) => helper.buildActions(),
+                      ],
+                    ),
+                    const SizedBox(height: 8.0),
+                    Focus(
+                      skipTraversal: true,
+                      descendantsAreTraversable: false,
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        children: [
+                          helper.code != null
+                              ? FilledButton.tonalIcon(
+                                  icon: helper.buildCodeIcon(),
+                                  label: helper.buildCodeLabel(),
+                                  style: buttonStyle,
+                                  onPressed:
+                                      Actions.handler(context, openIntent),
+                                )
+                              : FilledButton.tonal(
+                                  style: buttonStyle,
+                                  onPressed:
+                                      Actions.handler(context, openIntent),
+                                  child: helper.buildCodeIcon()),
+                        ],
+                      ),
+                    ),
+                  ],
                 ),
-              ));
-        });
-      },
+              );
+            }
+          : null,
     );
   }
 }
